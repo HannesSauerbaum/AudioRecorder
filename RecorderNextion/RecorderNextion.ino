@@ -29,30 +29,31 @@
 
 // eigene Files
 #include <RMSLevel.h>
-#include <WaveHeader.h>
-#include <RunningTimeLabel.h>
+#include <AutomaticGainControl.h>
 
 //-----------------------------------------------------------------------------------------
 // AUDIO
 //-----------------------------------------------------------------------------------------
-AudioInputI2S            i2s2 ;
-AudioAnalyzePeak         peak1;
-AudioRecordQueue         queue1;
-AudioPlaySdWav           playWav1;
-AudioOutputI2S           i2s1;
+AudioInputI2S            i2s2 ;           //xy=105,63
+AudioAnalyzePeak         peak1;          //xy=278,108
+// AUDIO ANALYZE RMS HINZUFUEGEN
+AudioAnalyzeRMS          rms_mono;
+AudioRecordQueue         queue1;         //xy=281,63
+AudioPlaySdRaw           playRaw1;       //xy=302,157
+AudioOutputI2S           i2s1;           //xy=470,120
 AudioConnection          patchCord1(i2s2, 0, queue1, 0);
 AudioConnection          patchCord2(i2s2, 0, peak1, 0);
-AudioConnection          patchCord3(playWav1, 0, i2s1, 0);
-AudioConnection          patchCord4(playWav1, 0, i2s1, 1);
-AudioConnection          patchCord5(i2s2, 0, i2s1, 0);
-AudioConnection          patchCord6(i2s2, 0, i2s1, 1);
+AudioConnection          patchCord3(playRaw1, 0, i2s1, 0);
+AudioConnection          patchCord4(playRaw1, 0, i2s1, 1);
+AudioConnection          patchCord6(i2s2, 0, i2s1, 0);
+AudioConnection          patchCord7(i2s2, 0, i2s1, 1);
+AudioConnection          patchCord5(i2s2, 0, rms_mono, 0);
 AudioControlSGTL5000     sgtl5000_1;     //xy=265,212
 
 //-----------------------------------------------------------------------------------------
 // TIMING
 //-----------------------------------------------------------------------------------------
-elapsedMillis            TimerDisp;
-elapsedMillis            TimePassed;
+elapsedMillis            TimerLvl;
 
 //-----------------------------------------------------------------------------------------
 //BUTTONS
@@ -62,7 +63,13 @@ NexButton buttonStop = NexButton(0,2,"Stop");
 NexButton buttonPlay = NexButton(0,1,"Play");
 NexProgressBar ProgBarLevel = NexProgressBar(0,10,"Pegel");
 NexButton buttonCheckLvl = NexButton(0,12,"CheckLvl");
-NexText textTimer = NexText(0,7,"Timer");
+NexButton buttonAGC = NexButton(0, 18, "AGC");
+NexSlider sliderVolume = NexSlider(0, 15, "Volume");
+NexSlider sliderGain = NexSlider(0, 11, "Gain");
+NexSlider sliderAGChang = NexSlider(2, 26, "AGChang");
+NexSlider sliderAGCslopeInc = NexSlider(2, 25, "AGCslopeInc");
+NexSlider sliderAGCslopeDec = NexSlider(2, 24, "AGCslopeDec");
+NexSlider sliderAGCtresh = NexSlider(2, 7, "AGCtresh");
 
 NexTouch *nex_listen_list[] =
 {
@@ -70,6 +77,13 @@ NexTouch *nex_listen_list[] =
   &buttonStop,
   &buttonPlay,
   &buttonCheckLvl,
+  &buttonAGC,
+  &sliderVolume,
+  &sliderGain,
+  &sliderAGChang,
+  &sliderAGCslopeInc,
+  &sliderAGCslopeDec,
+  &sliderAGCtresh,
   NULL
 };
 
@@ -84,25 +98,25 @@ int mode = 0;  // 0=stopped, 1=recording, 2=playing
 File frec;
 
 //-----------------------------------------------------------------------------------------
-// RUNNING TIME LABEL
-//-----------------------------------------------------------------------------------------
-char TimerVal[] = "00:00:00";
-RunningTimeLabel tLabel;
-
-//-----------------------------------------------------------------------------------------
-// WAVE HEADER
-//-----------------------------------------------------------------------------------------
-WaveHeader wavHead;
-unsigned long recByteSaved = 0L;
-
-//-----------------------------------------------------------------------------------------
 // RMS-METER
 //-----------------------------------------------------------------------------------------
 double tau = 0.125;
 double f_refresh = 4;
 RMSLevel rmsMeter(tau,f_refresh);
 bool checkLvl = false;
-unsigned int dispDelay = 1000/f_refresh;
+int dispDelay = 1000/f_refresh;
+
+//-----------------------------------------------------------------------------------------
+// Automatic Gain Control
+//-----------------------------------------------------------------------------------------
+int AGCMode = 1;                   
+int AGChangtime = 500;               
+double AGCtresh = 0.95;             
+double AGCslopeIncrease  = 0.1;         
+double AGCslopeDecrease  = 1.0;      
+double peak;                         
+elapsedMillis MilliSec=0;
+double AGCvalue;
 
 //-----------------------------------------------------------------------------------------
 // SETUP
@@ -138,6 +152,13 @@ void setup() {
   buttonStop.attachPush(StopButtonCallback);
   buttonPlay.attachPush(PlayButtonCallback);
   buttonCheckLvl.attachPush(buttonCheckLvlCallback);
+  buttonAGC.attachPush(AGCButtonCallback);
+  sliderVolume.attachPop(sliderVolumeCallback);
+  sliderGain.attachPop(sliderGainCallback);
+  sliderAGChang.attachPop(sliderAGChangCallback);
+  sliderAGCslopeInc.attachPop(sliderAGCslopeIncCallback);
+  sliderAGCslopeDec.attachPop(sliderAGCslopeDecCallback);
+  sliderAGCtresh.attachPop(sliderAGCtreshCallback);
 }
 
 //-----------------------------------------------------------------------------------------
@@ -145,32 +166,22 @@ void setup() {
 //-----------------------------------------------------------------------------------------
 void loop() {
   nexLoop(nex_listen_list);
-  
-  switch(mode){
-    case 0:
-      break;
-    case 1:
-      continueRecording();
-      break;
-    case 2:
-      continuePlaying();
-      break;
-  }
 
-  if (TimerDisp >=dispDelay){
-    if(checkLvl){
+  if (mode == 1) {
+    continueRecording();
+  }
+  if (mode == 2) {
+    continuePlaying();
+  }
+  if (checkLvl){
+    if(TimerLvl >=dispDelay){
       displayLvl();
-      Serial.println(peak1.read());
+      TimerLvl-=dispDelay;
     }
-    
-    if (mode == 1 /*|| mode == 2*/){
-      tLabel.updateLabel(TimePassed,TimerVal);
-      textTimer.setText(TimerVal);
-    }
-
-    TimerDisp-=dispDelay;
   }
-  
+  if (AGCMode == 2){
+  AutoGain();
+  }
 }
 
 //-----------------------------------------------------------------------------------------
@@ -178,19 +189,17 @@ void loop() {
 //-----------------------------------------------------------------------------------------
 void startRecording() {
   Serial.println("startRecording");
-    if (SD.exists("RECORD.WAV")) {
+    if (SD.exists("RECORD.RAW")) {
     // The SD library writes new data to the end of the
     // file, so to start a new recording, the old file
     // must be deleted before new data is written.
-    SD.remove("RECORD.WAV");
+    SD.remove("RECORD.RAW");
   }
-  frec = SD.open("RECORD.WAV", FILE_WRITE);
+  frec = SD.open("RECORD.RAW", FILE_WRITE);
   if (frec) {
     queue1.begin();
     mode = 1;
-    recByteSaved = 0L;
     checkLvl = true;
-    TimePassed = 0;
   }
 }
 
@@ -201,9 +210,7 @@ void continueRecording() {
     queue1.freeBuffer();
     memcpy(buffer+256, queue1.readBuffer(), 256);
     queue1.freeBuffer();
-    frec.write(buffer, 512);
-
-    recByteSaved += 512;   
+    frec.write(buffer, 512);                          // Addiert in jedem Durchlauf 512 Bytes   
   }
 }
 
@@ -214,11 +221,7 @@ void stopRecording() {
     while (queue1.available() > 0) {
       frec.write((byte*)queue1.readBuffer(), 256);
       queue1.freeBuffer();
-
-      recByteSaved += 256;  
     }
-    wavHead.writeWaveHeader(recByteSaved, frec);
-    //frec.close();
   }
   mode = 0;
   checkLvl = false;
@@ -226,36 +229,42 @@ void stopRecording() {
 
 
 void startPlaying() {
-  /*
   Serial.println("startPlaying");
-  playWav1.play("RECORD.WAV");
+  playRaw1.play("RECORD.RAW");
   mode = 2;
-  */
 }
 
 void continuePlaying() {
-  /*
-  if (!playWav1.isPlaying()) {
-    playWav1.stop();
+  if (!playRaw1.isPlaying()) {
+    playRaw1.stop();
     mode = 0;
   }
-  */
 }
 
 
 void stopPlaying() {
-  /*
   Serial.println("stopPlaying");
-  if (mode == 2) playWav1.stop();
+  if (mode == 2) playRaw1.stop();
   mode = 0;
-  */
+}
+
+void AutoGain() 
+{
+  AutomaticGainControl agc(AGChangtime,AGCtresh,AGCslopeIncrease,AGCslopeDecrease,peak);
+  if (MilliSec > 2)
+  {
+    peak = peak1.read(); 
+    double AGCgain = double(agc.AGC(double(AGCvalue)));
+    sgtl5000_1.micGain(AGCgain);
+    MilliSec = 0;
+  }
 }
 
 //-----------------------------------------------------------------------------------------
 // ANZEIGE FUNKTIONEN
 //-----------------------------------------------------------------------------------------
 void displayLvl() {
-  uint32_t ProgBarVal = uint32_t(100*(1-(rmsMeter.updateRMS(double(peak1.read()))/-80)));
+  uint32_t ProgBarVal = uint32_t(100*(1-(rmsMeter.updateRMS(double(rms_mono.read()))/-80)));
   Serial.println(ProgBarVal);
   ProgBarLevel.setValue(ProgBarVal); 
 }
@@ -267,48 +276,30 @@ void displayLvl() {
 void RecordButtonCallback(void *ptr)
 {
   Serial.print("Record");
-  switch(mode){
-    case 0:
-      startRecording();
-      TimerDisp=0;
-      break;
-    case 1:
-      stopRecording();
-      break;
-    case 2:
-      break;
+  if (mode == 1) {
+    stopRecording();
+    //break;
   }
+  if (mode == 0) 
+  {
+    startRecording();
+    TimerLvl=0;
+  }  
 }
 
 void StopButtonCallback(void *ptr)
 {
   Serial.println("Stop Button Press");
-  switch(mode){
-    case 0:
-      break;
-    case 1:
-      stopRecording();
-      break;
-    case 2:
-      stopPlaying();
-      break;
-  }
+  if (mode == 1) stopRecording();
+  if (mode == 2) stopPlaying();
   checkLvl = false;
 }
 
 void PlayButtonCallback(void *ptr)
 {
   Serial.println("Play Button Press");
-  switch(mode){
-    case 0:
-      startPlaying();
-      break;
-    case 1:
-      startPlaying();
-      break;
-    case 2:
-      break;
-  }
+  if (mode == 1) stopRecording();
+  if (mode == 0) startPlaying();
 }
 
 void buttonCheckLvlCallback(void *ptr)
@@ -316,7 +307,7 @@ void buttonCheckLvlCallback(void *ptr)
   if (!checkLvl)
   {
     Serial.println("Checking Level");
-    TimerDisp = 0;
+    TimerLvl = 0;
     checkLvl = true;
   }
   else
@@ -324,6 +315,130 @@ void buttonCheckLvlCallback(void *ptr)
     Serial.println("Stop Checking Level");
     checkLvl = false;
   }
-  
+}  
+
+void sliderVolumeCallback(void *ptr)
+{
+  uint32_t slideValue = 0;
+  sliderVolume.getValue(&slideValue);
+  double volumeValue = slideValue /100.0;
+  sgtl5000_1.volume(volumeValue);
 }
-//-----------------------------------------------------------------------------------------
+
+void sliderGainCallback(void *ptr)
+{
+  uint32_t slideGainValue = 0;
+  sliderGain.getValue(&slideGainValue);
+  double gainValue = slideGainValue; 
+  sgtl5000_1.micGain(gainValue);
+}
+
+void AGCButtonCallback(void *ptr)
+{
+  Serial.println("AGC Button Press");
+    if (AGCMode == 1)
+      {
+      AGCMode = 2;                             
+      Serial.println("AGC On");
+      }      
+    else 
+      {
+      AGCMode = 1;
+      Serial.println("AGC Off");                 
+      }       
+}
+
+void sliderAGChangCallback(void *ptr)
+{
+  uint32_t hangSetting = 0;
+  sliderAGChang.getValue(&hangSetting);
+  if (hangSetting == 1)
+  {
+    AGChangtime = 0;           //Off
+    Serial.println("AGC Hangtime Off");
+  }
+
+  if (hangSetting == 2)
+  {
+    AGChangtime = 250;         //500ms
+    Serial.println("AGC Hangtime 500ms");
+  }
+
+  if (hangSetting == 3)
+  {
+    AGChangtime = 500;         //1000ms
+    Serial.println("AGC Hangtime 1000ms");
+  }
+
+  if (hangSetting == 4)
+  {
+    AGChangtime = 1000;        //2000ms
+    Serial.println("AGC Hangtime 2000ms");
+  }
+}
+
+void sliderAGCslopeIncCallback(void *ptr)
+{
+  uint32_t slopeIncSetting = 0;
+  sliderAGCslopeInc.getValue(&slopeIncSetting);
+  if (slopeIncSetting == 1)
+  {
+    AGCslopeIncrease = 0.05;        
+    Serial.println("AGCslopeIncrease = 0.05");
+  }
+
+  if (slopeIncSetting == 2)
+  {
+    AGCslopeIncrease = 0.1;         
+    Serial.println("AGCslopeIncrease = 0.1");
+  }
+
+  if (slopeIncSetting == 3)
+  {
+    AGCslopeIncrease = 0.5;         
+    Serial.println("AGCslopeIncrease = 0.5");
+  }
+
+  if (slopeIncSetting == 4)
+  {
+    AGCslopeIncrease = 1.0;        
+    Serial.println("AGCslopeIncrease = 1");
+  }
+}
+void sliderAGCslopeDecCallback(void *ptr)
+{
+  uint32_t slopeDecSetting = 0;
+  sliderAGCslopeDec.getValue(&slopeDecSetting);
+  if (slopeDecSetting == 1)
+  {
+    AGCslopeDecrease = 0.1;         
+    Serial.println("AGCslopeDecrease = 0.1");
+  }
+
+  if (slopeDecSetting == 2)
+  {
+    AGCslopeDecrease = 0.5;         
+    Serial.println("AGCslopeDecrease = 0.5");
+  }
+
+  if (slopeDecSetting == 3)
+  {
+    AGCslopeDecrease = 1.0;         
+    Serial.println("AGCslopeDecrease = 1.0");
+  }
+
+  if (slopeDecSetting == 4)
+  {
+    AGCslopeDecrease = 2.0;        
+    Serial.println("AGCslopeDecrease = 2.0");
+  }
+}
+void sliderAGCtreshCallback(void *ptr)
+{
+  uint32_t treshSetting = 0;
+  sliderAGCtresh.getValue(&treshSetting);
+  double treshSet = (treshSetting + 60);
+  AGCtresh = treshSet/100;
+  Serial.println("AGCtresh = ");
+  Serial.println(AGCtresh);
+}
